@@ -1,352 +1,86 @@
-# 2021 한국어 질의응답 AI 경진대회 - Baseline 코드 안내
-## 환경설정
+# [2021 한국어 질의응답 AI 경진대회: 비디오 네러티브 질의응답 태스크](http://ai-competition.kaist.ac.kr/)
+## 대회 설명
+<img src='https://user-images.githubusercontent.com/57934461/146944769-a62a0b8f-4a19-4a47-85e8-4818f9ef8ce6.jpg' width=500 />
 
-<aside>
-❗ 1. 원천데이터와 라벨링 데이터 구조는 [데이터 구조]와 같다고 가정한다.
-	
-2. 모든 명령은 baseline_code 폴더 아래에서 실행한다.
+### 개요
 
-</aside>
+비디오 네러티브 질의응답이란 영상(4~5초)에 대한 질문이 주어졌을 때 해당 질문에 대한 답을 보기에서 찾는 태스크로서, 기존의 이미지에 대한 질문에 답하는 VQA 문제에 시간축이 추가된 태스크임. 본 태스크는 영상정보와 자연어 정보에 대한 이해를 바탕으로 각각 다른 modality 정보를 활용하여 학습하여, 주어진 자연어 질문에 대한 가장 적합한 답을 찾는 문제임.
 
-## [데이터 구조]
 
-### Train 데이터
-```bash
-{사용자 지정 경로}/raw_data/train/원천데이터
-	ㄴ예능교양
-		ㄴ 대본X
-		ㄴ 대본O
-	ㄴ스포츠
-		ㄴ 대본X
-	ㄴ생활안전
-		ㄴ 대본X
-		ㄴ 대본O
-
-{사용자 지정 경로}/raw_data/train/라벨링데이터
-	ㄴ예능교양
-		ㄴ 대본X
-		ㄴ 대본O
-	ㄴ스포츠
-		ㄴ 대본X
-	ㄴ생활안전
-		ㄴ 대본X
-		ㄴ 대본O
+예를 들어, 빨간색 유니폼을 입은 선수가 오른쪽으로 뛰는 영상에 대해 다음과 같은 질문과 보기가 주어짐.
 ```
-### Test 데이터
-```bash
-{사용자 지정 경로}/raw_data/test/원천데이터
-	ㄴ예능교양
-		ㄴ 대본X
-		ㄴ 대본O
-	ㄴ스포츠
-		ㄴ 대본X
-	ㄴ생활안전
-		ㄴ 대본X
-		ㄴ 대본O
-
-{사용자 지정 경로}/raw_data/test/라벨링데이터
-	ㄴ예능교양
-		ㄴ 대본X
-		ㄴ 대본O
-	ㄴ스포츠
-		ㄴ 대본X
-	ㄴ생활안전
-		ㄴ 대본X
-		ㄴ 대본O
+질문: 오른쪽으로 뛰는 사람이 어떤 옷을 입었습니까?
+보기: 1. 한복, 2. 소방복, 3. 운동복, 4. 경찰복, 5. 수술복
 ```
-## 공통
+## 프로젝트 구조
 
-** {사용자 지정 data경로} 는 data의 '원천데이터' 혹은 '라벨링데이터' 상위경로까지만 작성한다.
-
-ex. data 위치 경로가 "/home/data/원천데이터 혹은 라벨링데이터"일 경우
-
-명령어는 아래와 같다.
-
-```bash
-# 테스트 language-feature 추출
-python3 preprocess/preprocess_questions.py --dataset video-narr --glove_pt /{사용자 지정 경로}/word-embeddings/glove/glove.korean.pkl --mode test --video_dir /home/data
 ```
-
-## 0. 사전 준비사항
-
-### Raw data 혹은 feature 파일 다운로드
-
-아래 클릭하여 다운로드
-featrue data와 vocab.json은 "baseline_code/data/video-narr/"에 업로드해주세요.
-
-- [raw data](https://drive.google.com/file/d/1fbMB1XQvJCa2ODV0ssHYSlSXGf1fe13E/view?usp=sharing)
-- [feature data](https://drive.google.com/file/d/15dUXKfrR5eUAa2NIK_Oid6SdTcvyfzPg/view?usp=sharing) (video-narr_appearance_feat.h5, video-narr_motion_feat.h5 파일로 구성됨)
-   - 📌 [video-narr_motion_feat.h5 만 다운로드](https://drive.google.com/file/d/1smHeKz-doCJbMo9gXhc6r3CsMZYpniQf/view?usp=sharing) 	
-
-### 한국어 Embedding (glove.korean.pkl 파일) 다운로드
-
-아래 클릭하여 다운로드 후, 원하시는 경로에 저장해주세요.
-이후, 해당 경로를 preprocess --glove_pt argument에 명시해주세요. 
-
-- [glove.korean.pkl](https://drive.google.com/file/d/1rl3BiT7OcOzakPEp3JGmeEZBSAaM2B4Y/view?usp=sharing)
-
-### Video Feature 추출에 필요한 모듈(resnet, resnext binary 파일) 다운로드
-
-아래 클릭하여 다운로드 후, 
-"baseline_code/data/preprocess/pretrained/"경로에 업로드해주세요.
-
-- [resnet,resnext binary](https://drive.google.com/file/d/1XBXtgE00W69y9h3NQP3w6ajT_kYnia9W/view?usp=sharing)
-
-### 리눅스 한글 세팅
-
-[출처] : [https://epicarts.tistory.com/30](https://epicarts.tistory.com/30) [일상 생활]
-
-- 1 - 한글 언어팩 설치
-    
-    ```bash
-    apt-get isntall language-pack-ko
-    ```
-    
-- 2 - locale 생성
-    
-    ```bash
-    locale gen ko.KR.UTF-8
-    ```
-    
-- 3 - locale 설정
-    - 3-1 locale 파일 open
-        
-        ```bash
-        vim /etc/default/locale
-        ```
-        
-    - 3-2 LANG option 추가 입력 (en_US.UTF-8 의 경우 입력되어 있으면 입력할 필요 없음)
-        
-        ```bash
-        LANG=en_US.UTF-8
-        LANG=ko_KR.UTF-8
-        ```
-        
-- 4 - environment 설정
-    - 4-1 environment 파일 open
-        
-        ```bash
-        vim /etc/environment
-        ```
-        
-    - 4-2 LANG option 추가 입력
-        
-        ```bash
-        LANG=ko_KR.UTF8
-        LANGUAGE=ko_KR:ko:en_GB:en
-        ```
-        
-- 5 - 폰트 설치
-    
-    ```bash
-    apt-get install fonts-nanum*
-    ```
-    
-- 6 - 재부팅
-    
-    ```bash
-    reboot / init 6
-    ```
-    
-
-## 한국어 NLP를 위한 형태소 분석기 Mecab 설치
-
-[출처] : [https://i-am-eden.tistory.com/9](https://i-am-eden.tistory.com/9)
-
-- 1 - JDK 설치
-    
-    ```bash
-    sudo apt-get install openjdk-8-jdk python-dev 
-    sudo apt-get install python3-dev
-    ```
-    
-- 2 - KoNLPy 설치
-    
-    ```bash
-    pip3 install konlpy
-    ```
-    
-- 3 - Mecab 설치
-    
-    ```bash
-    wget https://bitbucket.org/eunjeon/mecab-ko/downloads/mecab-0.996-ko-0.9.2.tar.gz
-    tar -zxvf mecab-*-ko-*.tar.gz
-    
-    cd mecab-0.996-ko-0.9.2/
-    ./configure
-    make
-    make check
-    sudo make install
-    ```
-    
-- 4 - Mecab-ko-dic 사전 설치
-    
-    ```bash
-    wget https://bitbucket.org/eunjeon/mecab-ko-dic/downloads/mecab-ko-dic-2.0.1-20150920.tar.gz
-    tar -zxvf mecab-ko-dic-2.0.1-20150920.tar.gz
-    cd mecab-ko-dic-2.0.1-20150920/
-    ./autogen.sh
-    ./configure
-    make
-    sudo make install
-    cd ..
-    ```
-    
-    ```bash
-    git clone https://bitbucket.org/eunjeon/mecab-python-0.996.git
-    cd mecab-python-0.996/
-    python3 setup.py build
-    python3 setup.py install
-    cd ..
-    pwd
-    ```
-    
-
-## 필요한 라이브러리 설치
-
-### requirements.txt 설치
-
-```bash
-../baseline_code$ pip3 install -r requirements.txt
+.
+├── data
+│   ├── raw_data
+│   │   ├── train
+│   │   │   └── 원천데이터
+│   │   │       ├── 스포츠
+│   │   │       │   └── 대본X
+│   │   │       ├── 예능교양
+│   │   │       │   ├── 대본O
+│   │   │       │   └── 대본X
+│   │   │       └── 생활안전
+│   │   │           ├── 대본O
+│   │   │           └── 대본X
+│   │   │   └── 라벨링데이터
+│   │   │       ├── 스포츠
+│   │   │       │   └── 대본X
+│   │   │       │       └── output.json
+│   │   │       ├── 예능교양
+│   │   │       │   ├── 대본O
+│   │   │       │   │   └── output.json
+│   │   │       │   └── 대본X
+│   │   │       │       └── output.json
+│   │   │       └── 생활안전
+│   │   │           ├── 대본O
+│   │   │           │   └── output.json
+│   │   │           └── 대본X
+│   │   │               └── output.json
+│   │   └── test # train과 동일
+│   │    
+│   ├── test.json
+│   └── train.json
+├── infer.sh
+├── requirements.txt
+├── preprocess.py
+├── run.py
+└── run.shㅍ
 ```
+### data
+- 초기 상태에는 [baselinee 코드](https://github.com/Surromind-AI/videonarrative)에서 제공된 `raw_data` 만 존재합니다.
+- `train.json`, `test.json` 파일은 이후에 `preprocess.py` 파일을 통해 생성합니다.
 
-### ffmpeg 설치
-
-```bash
-pip3 install ffmpeg
+## 사용법
+### Clone
+``` bash
+git clone https://github.com/happyBeagle/2021_korean_vqa.git
 ```
-
-## 1. feature 추출 진행
-
-1) 학습 language feature 추출 명령어
-
-```bash
-python3 preprocess/preprocess_questions.py --dataset video-narr --glove_pt /{사용자 지정 경로}/word-embeddings/glove/glove.korean.pkl --mode train --video_dir {비디오경로}
+### Install requirements
+``` bash
+pip install -r requirements.txt
 ```
+### Download raw data
+- [baseline repository](https://github.com/Surromind-AI/videonarrative) 에서 raw_data 를 다운 받아 `data` 디렉토리 안에 둡니다
 
-<aside>
-📌 해당 language feature 추출 진행 시,
-학습 데이터셋의 10%는 검증 데이터로 사용되어 위의 학습 language feature 추출 명령어 진행시, train_questions.pt, val_questions.pt 2 파일이 저장된다.
-
-e.g) 학습 데이터셋 : 100개
-실제 학습 데이터셋 : 90개
-검증 데이터 : 10개
-
-</aside>
-
-2) video feature 추출 진행
-
-    📌 위에서 feature data를 받은 경우 이 과정은 skip 가능
-    
-    (1) video appearance feature 추출 명령어
-    
-    ```bash
-    python3 preprocess/preprocess_features.py --gpu_id 0 --dataset video-narr --model resnet101 --video_dir {비디오경로}
-    ```
-    
-    (2) video motion feature 추출 명령어
-    
-    ```bash
-    python3 preprocess/preprocess_features.py --gpu_id 0 --dataset video-narr --model resnext101 --image_height 112 --image_width 112 --video_dir {video 경로}
-    ```
-    
-## 2. Data Load
-
-- vocab, question 데이터 로드
-```python
-# DataLoader.py
-print('loading vocab from %s' % (vocab_json_path))
-vocab = load_vocab(vocab_json_path)
-
-question_pt_path = str(kwargs.pop('question_pt'))
-print('loading questions from %s' % (question_pt_path))
-question_type = kwargs.pop('question_type')
-with open(question_pt_path, 'rb') as f:
-    obj = pickle.load(f)
-    questions = obj['questions']
-    questions_len = obj['questions_len']
-    video_ids = obj['video_ids']
-    q_ids = obj['question_id']
-    answers = obj['answers']
-    glove_matrix = obj['glove']
-    ans_candidates = np.zeros(5)
-    ans_candidates_len = np.zeros(5)
-    if question_type in ['action', 'transition','none']:
-        ans_candidates = obj['ans_candidates']
-        ans_candidates_len = obj['ans_candidates_len']
+### Preprocess raw data
+``` bash
+python preprocess.py
 ```
-
-- video feature 데이터 로드
-
-```python
-# DataLoader.py
-print('loading appearance feature from %s' % (kwargs['appearance_feat']))
-with h5py.File(kwargs['appearance_feat'], 'r') as app_features_file:
-    app_video_ids = app_features_file['ids'][()]
-app_feat_id_to_index = {str(id): i for i, id in enumerate(app_video_ids)}
-print('loading motion feature from %s' % (kwargs['motion_feat']))
-with h5py.File(kwargs['motion_feat'], 'r') as motion_features_file:
-    motion_video_ids = motion_features_file['ids'][()]
-motion_feat_id_to_index = {str(id): i for i, id in enumerate(motion_video_ids)}
-self.app_feature_h5 = kwargs.pop('appearance_feat')
-self.motion_feature_h5 = kwargs.pop('motion_feat')
+### Train
+``` bash
+sh run.sh
 ```
-
-## 3. 학습 진행
-
-- 학습 데이터 Load
-```python
-# train.py
-train_loader = VideoQADataLoader(**train_loader_kwargs)
-logging.info("number of train instances: {}".format(len(train_loader.dataset)))
-logging.info("question type of VideoQADataLoader: {}".format(train_loader.dataset.question_type))
+### Inference
+``` bash
+sh infer.sh
 ```
-
-- 학습 관련 parameter 설정 yaml
-```yaml
-# configs/video_narr.yaml
-gpu_id: 0
-multi_gpus: True
-num_workers: 2
-seed: 666
-exp_name: 'expVIDEO-NARR'
-
-train:
-  lr: 0.0001
-  batch_size: 32
-  restore: False
-  max_epochs: 25
-  word_dim: 100 #300
-  module_dim: 512
-  glove: True
-  k_max_frame_level: 16
-  k_max_clip_level: 8
-  spl_resolution: 1
-
-val:
-  flag: True
-
-test:
-  test_num: 0
-  write_preds: True
-
-dataset:
-  name: 'video-narr'
-  question_type: 'none'
-  data_dir: 'data/video-narr'
-  save_dir: 'results/'
-```
-
-- 학습 진행 명령어
-→ 1 epoch 마다 10% 데이터로 학습 모델 검증도 진행됨.
-
-```bash
-	python3 train.py --cfg configs/video_narr.yml
-```
-📌 상기 yaml 설정 하에서 V100 GPU 2장을 사용하여 학습시 4시간 여 시간 소요
-
-## 4. 검증 진행
-
-```bash
-python3 validate.py --cfg configs/video_narr.yml
-```
+## To Do
+- [ ] Use image features
+## Reference
+- [huggingface transformers](https://github.com/huggingface/transformers)ㅍ
