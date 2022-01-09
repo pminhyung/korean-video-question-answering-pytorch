@@ -1,0 +1,44 @@
+# [build tokenizer(koelectra) - train + test]
+python preprocess/build_koelectra_vocab.py \
+--vocab_json "data/{}/{}_all_vocab.json" \
+--dataset video-narr \
+--video_dir ./data/raw_data \
+--tokenizer_dir ./data/video-narr/tokenizer/
+
+# [build vocab (train all)]
+python preprocess/build_vocabs.py --vocab_json "data/{}/{}_all_vocab.json" --dataset video-narr --mode train --video_dir ./data/raw_data
+
+# [question (tokenizer + train all)]
+python3 preprocess/preprocess_questions.py \
+--dataset video-narr \
+--glove_pt ./data/glove/glove.korean.pkl \
+--mode train \
+--split_train f \
+--video_dir ./data/raw_data \
+--tokenizer_dir ./data/video-narr/tokenizer/
+
+# question (test)
+python3 preprocess/preprocess_questions.py \
+--dataset video-narr \
+--glove_pt ./data/glove/glove.korean.pkl \
+--mode test \
+--split_train f \
+--video_dir ./data/raw_data \
+--tokenizer_dir ./data/video-narr/tokenizer/
+
+# appearance / motion features (train)
+python3 preprocess/preprocess_features.py --dataset video-narr --model resnext101 --image_height 112 --image_width 112 --video_dir ./data/raw_data/train
+python3 preprocess/preprocess_features.py --gpu_id 0 --dataset video-narr --model resnet101 --video_dir ./data/raw_data/train
+
+# appearance / motion features (test)
+python3 preprocess/preprocess_features.py --dataset video-narr --out "data/{}/test_{}_{}_feat.h5" --model resnext101 --image_height 112 --image_width 112 --video_dir ./data/raw_data/test
+python3 preprocess/preprocess_features.py --gpu_id 0 --dataset video-narr --out "data/{}/test_{}_{}_feat.h5" --model resnet101 --video_dir ./data/raw_data/test
+
+# train all
+python3 train.py --cfg configs/video_narr_trainall.yml
+
+# train (9:1)
+python3 train.py --cfg configs/video_narr.yml
+
+# test
+python3 validate.py --cfg configs/video_narr_trainall.yml

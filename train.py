@@ -1,0 +1,416 @@
+import os, sys
+
+import torch
+import torch.optim as optim
+import torch.nn as nn
+import numpy as np
+import argparse
+import time
+import logging
+from termcolor import colored
+from tqdm import tqdm
+import time
+from tensorboardX import SummaryWriter
+import matplotlib.pyplot as plts
+from callbacks import CosineAnnealingWarmUpRestarts
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)-8s %(message)s')
+logFormatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
+rootLogger = logging.getLogger()
+writer = SummaryWriter()
+
+from DataLoader import VideoQADataLoader
+from utils import todevice
+from validate import validate
+
+import model.HCRN as HCRN
+
+from utils import todevice
+
+from config import cfg, cfg_from_file
+
+# 학습 진행 함수
+def train(cfg):
+    logging.info("Create train_loader and val_loader.........")
+    train_loader_kwargs = {
+        'question_type': cfg.dataset.question_type,
+        'question_pt': cfg.dataset.train_question_pt,
+        'vocab_json': cfg.dataset.vocab_json,
+        'appearance_feat': cfg.dataset.appearance_feat,
+        'motion_feat': cfg.dataset.motion_feat,
+        'train_num': cfg.train.train_num,
+        'batch_size': cfg.train.batch_size,
+        'num_workers': cfg.num_workers,
+        'shuffle': True
+    }
+    train_loader = VideoQADataLoader(**train_loader_kwargs)
+    logging.info("number of train instances: {}".format(len(train_loader.dataset)))
+    logging.info("question type of VideoQADataLoader: {}".format(train_loader.dataset.question_type)) # 추가한 log
+    if cfg.val.flag:
+        val_loader_kwargs = {
+            'question_type': cfg.dataset.question_type,
+            'question_pt': cfg.dataset.val_question_pt,
+            'vocab_json': cfg.dataset.vocab_json,
+            'appearance_feat': cfg.dataset.appearance_feat,
+            'motion_feat': cfg.dataset.motion_feat,
+            'val_num': cfg.val.val_num,
+            'batch_size': cfg.train.batch_size,
+            'num_workers': cfg.num_workers,
+            'shuffle': False
+        }
+        val_loader = VideoQADataLoader(**val_loader_kwargs)
+        logging.info("number of val instances: {}".format(len(val_loader.dataset)))
+
+    logging.info("Create model.........")
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model_kwargs = {
+        'vision_dim': cfg.train.vision_dim,
+        'module_dim': cfg.train.module_dim,
+        'word_dim': cfg.train.word_dim,
+        'k_max_frame_level': cfg.train.k_max_frame_level,
+        'k_max_clip_level': cfg.train.k_max_clip_level,
+        'spl_resolution': cfg.train.spl_resolution,
+        'vocab': train_loader.vocab,
+        'question_type': cfg.dataset.question_type
+    }
+    model_kwargs_tosave = {k: v for k, v in model_kwargs.items() if k != 'vocab'}
+    model = HCRN.HCRNNetwork(**model_kwargs).to(device)
+    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logging.info('num of params: {}'.format(pytorch_total_params))
+    logging.info(model)
+
+    if cfg.train.glove:
+        logging.info('load glove vectors')
+        train_loader.glove_matrix = torch.FloatTensor(train_loader.glove_matrix).to(device)
+        with torch.no_grad():
+            model.linguistic_input_unit.encoder_embed.weight.set_(train_loader.glove_matrix)
+    if torch.cuda.device_count() > 1 and cfg.multi_gpus:
+        model = model.cuda()
+        logging.info("Using {} GPUs".format(torch.cuda.device_count()))
+        model = nn.DataParallel(model, device_ids=None) # original : device_ids = None
+
+    optimizer = optim.Adam(model.parameters(), cfg.train.lr)
+    if cfg.train.scheduler=='CosineAnnealing':
+        optimizer = optim.Adam(model.parameters(), cfg.train.warmup_min_lr)
+
+    start_epoch = 0
+    if cfg.dataset.question_type == 'count':
+        best_val = 100.0
+    else:
+        best_val = 0
+    if cfg.train.restore:
+        print("Restore checkpoint and optimizer...")
+        ckpt = os.path.join(cfg.dataset.save_dir, 'ckpt', 'model.pt')
+        ckpt = torch.load(ckpt, map_location=lambda storage, loc: storage)
+        start_epoch = ckpt['epoch'] + 1
+        model.load_state_dict(ckpt['state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer'])
+    if cfg.dataset.question_type in ['frameqa', 'none']:
+        criterion = nn.CrossEntropyLoss().to(device)
+    elif cfg.dataset.question_type == 'count':
+        criterion = nn.MSELoss().to(device)
+
+    #################### wandb ####################
+    import wandb
+
+    def get_config(kfolds=False):
+        config = {
+            # 'framework': 'smp', 
+            # 'img_size': IMGSIZE, 
+            'batch_size':cfg.train.batch_size,
+            'epochs': cfg.train.max_epochs, 
+            'model':model.__class__.__name__,
+            'pretrained':'False', 
+            'loss':criterion.__class__.__name__,
+            'optimizer': optimizer.__class__.__name__,
+            # 'learning_rate' : cfg.train.lr,
+            # 'weight_decay':PRE_WEIGHT_DECAY, 
+            # 'early_stopping_patience':es_patience, 
+            # 'early_stopping_mindelta': es_min_delta,
+            'random_seed': cfg.seed,
+            'num_train': len(train_loader.dataset)*0.8 if kfolds else len(train_loader.dataset),
+            #'num_val': len(train_loader.dataset)*0.2 if kfolds else len(val_loader.dataset),
+            'num_val': len(val_loader.dataset) if cfg.val.flag else 'none',
+            # 'num_test' : len(test_dataset),
+            }
+        return config
+
+    # # EXP = 0
+    wandb.init(project = f"vqa", config=get_config(), reinit=True)
+    wandb.run.name = cfg.exp_name
+    wandb.run.save()
+    wandb.watch(model, log="all")
+    
+    from callbacks import EarlyStoppingScore
+    es_patience=5
+    es_min_delta=1e-5
+    early_stopping = EarlyStoppingScore(patience=es_patience, min_delta=es_min_delta)
+    #################### wandb ####################
+
+    scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=2, T_mult=1, eta_max=cfg.train.lr,  T_up=1, gamma=1)
+
+    step_num = 0
+    logging.info("Start training........")
+    for epoch in tqdm(range(start_epoch, cfg.train.max_epochs), desc="epochs", leave=True):
+        logging.info('>>>>>> epoch {epoch} <<<<<<'.format(epoch=colored("{}".format(epoch), "green", attrs=["bold"])))
+        model.train()
+        total_acc, count = 0, 0
+        batch_mse_sum = 0.0
+        total_loss, avg_loss = 0.0, 0.0
+        avg_loss = 0
+        train_accuracy = 0
+        
+        # print(len(train_loader)) # step 667: 1ep
+
+        for i, batch in enumerate(iter(train_loader)):
+            progress = epoch + i / len(train_loader)
+            _, _, answers, *batch_input = [todevice(x, device) for x in batch]
+            answers = answers.cuda().squeeze()
+            batch_size = answers.size(0)
+            optimizer.zero_grad()
+            try:
+                logits = model(*batch_input)
+            except:
+                continue
+            if cfg.dataset.question_type in ['action', 'transition','none']:
+                batch_agg = np.concatenate(np.tile(np.arange(batch_size).reshape([batch_size, 1]),
+                                                   [1, 5])) * 5  # [0, 0, 0, 0, 0, 5, 5, 5, 5, 1, ...]
+                answers_agg = tile(answers, 0, 5)
+                loss = torch.max(torch.tensor(0.0).cuda(),
+                                 1.0 + logits - logits[answers_agg + torch.from_numpy(batch_agg).cuda()])
+                loss = loss.sum()
+                loss.backward()
+                total_loss += loss.detach()
+                avg_loss = total_loss / (i + 1)
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=12)
+                optimizer.step()
+                preds = torch.argmax(logits.view(batch_size, 5), dim=1)
+                aggreeings = (preds == answers)
+            elif cfg.dataset.question_type == 'count':
+                answers = answers.unsqueeze(-1)
+                loss = criterion(logits, answers.float())
+                loss.backward()
+                total_loss += loss.detach()
+                avg_loss = total_loss / (i + 1)
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=12)
+                optimizer.step()
+                preds = (logits + 0.5).long().clamp(min=1, max=10)
+                batch_mse = (preds - answers) ** 2
+            else:
+                loss = criterion(logits, answers)
+                loss.backward()
+                total_loss += loss.detach()
+                avg_loss = total_loss / (i + 1)
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=12)
+                optimizer.step()
+                aggreeings = batch_accuracy(logits, answers)
+
+            if cfg.dataset.question_type == 'count':
+                batch_avg_mse = batch_mse.sum().item() / answers.size(0)
+                batch_mse_sum += batch_mse.sum().item()
+                count += answers.size(0)
+                avg_mse = batch_mse_sum / count
+
+            else:
+                total_acc += aggreeings.sum().item()
+                count += answers.size(0)
+                train_accuracy = total_acc / count
+
+            # step_num += cfg.train.batch_size
+            step_num += (i+1)
+            lr_used = optimizer.param_groups[0]['lr']
+            wandb.log({"Loss" : avg_loss, "accuracy":train_accuracy, "epoch":epoch+1, 'lr':lr_used}, step=step_num)
+
+        scheduler.step(epoch)
+        if not cfg.val.flag:
+            wandb.alert(title="1ep", text=f"accuracy({round(train_accuracy, 4)}), epoch({epoch+1})")
+
+        sys.stdout.write("\n")
+        if not cfg.train.scheduler:
+            if cfg.dataset.question_type == 'count':
+                if (epoch + 1) % 5 == 0:
+                    optimizer = step_decay(cfg, optimizer)
+            else:
+                if (epoch + 1) % 10 == 0:
+                    optimizer = step_decay(cfg, optimizer)
+        sys.stdout.flush()
+        
+        logging.info("Epoch = %s   avg_loss = %.3f    avg_acc = %.3f" % (epoch, avg_loss, train_accuracy))
+
+        if cfg.val.flag:
+            output_dir = os.path.join(cfg.dataset.save_dir, 'preds')
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            else:
+                assert os.path.isdir(output_dir)
+            valid_acc, valid_loss = validate(cfg, model, val_loader, device, write_preds=False, istrain=True)
+            if (valid_acc > best_val and cfg.dataset.question_type != 'count') or (valid_acc < best_val and cfg.dataset.question_type == 'count'):
+                best_val = valid_acc
+                # Save best model
+                ckpt_dir = os.path.join(cfg.dataset.save_dir, 'ckpt')
+                if not os.path.exists(ckpt_dir):
+                    os.makedirs(ckpt_dir)
+                else:
+                    assert os.path.isdir(ckpt_dir)
+                save_checkpoint(epoch, model, optimizer, model_kwargs_tosave, os.path.join(ckpt_dir, f'model91_vacc{round(valid_acc,4)}_vloss{round(valid_loss,4)}_ep{epoch+1}.pt'))
+                sys.stdout.write('\n >>>>>> save to %s <<<<<< \n' % (ckpt_dir))
+                sys.stdout.flush()
+                wandb.alert(title="Best", text=f"val_accuracy({round(best_val, 4)})")
+
+            logging.info('~~~~~~ Valid Accuracy: %.4f ~~~~~~~' % valid_acc)
+            sys.stdout.write('~~~~~~ Valid Accuracy: {valid_acc} ~~~~~~~\n'.format(
+                valid_acc=colored("{:.4f}".format(valid_acc), "red", attrs=['bold'])))
+            sys.stdout.flush()
+
+            wandb.log({ 
+            'Epoch': epoch+1,
+            "val_accuracy":valid_acc,
+            "val_loss":valid_loss
+                        })
+
+            early_stopping(valid_acc)
+            if early_stopping.early_stop:
+                break
+        
+        writer.add_scalar('training_avg_loss', avg_loss, epoch)
+        writer.add_scalar('training_avg_accuracy', train_accuracy, epoch)
+        if cfg.val.flag:
+            writer.add_scalar('validate_accuracy', valid_acc, epoch)
+
+        if not cfg.val.flag:
+            early_stopping(train_accuracy)
+            if early_stopping.early_stop:
+                break
+            ckpt_dir = os.path.join(cfg.dataset.save_dir, 'ckpt')
+            if not os.path.exists(ckpt_dir):
+                os.makedirs(ckpt_dir)
+            else:
+                assert os.path.isdir(ckpt_dir)
+            save_checkpoint(epoch, model, optimizer, model_kwargs_tosave, os.path.join(ckpt_dir, f'modelall_acc{train_accuracy:.4f}_loss{avg_loss:.4f}_ep{epoch+1}.pt'))
+
+    writer.close()
+    if cfg.val.flag:
+        res_str = f"val_accuracy({valid_acc:.4f}, train_accuracy({train_accuracy:.4f}), epochs({epoch+1}))"
+    else:
+        res_str = f"acc({train_accuracy:.4f}), loss({avg_loss:.4f}), epoch({epoch+1})"
+
+    wandb.alert(title="Finish", 
+                    text=res_str)
+    wandb.run.finish()
+
+# Credit https://discuss.pytorch.org/t/how-to-tile-a-tensor/13853/4
+def tile(a, dim, n_tile):
+    init_dim = a.size(dim)
+    repeat_idx = [1] * a.dim()
+    repeat_idx[dim] = n_tile
+    a = a.repeat(*(repeat_idx))
+    order_index = torch.LongTensor(np.concatenate([init_dim * np.arange(n_tile) + i for i in range(init_dim)])).cuda()
+    return torch.index_select(a, dim, order_index)
+
+def step_decay(cfg, optimizer):
+    # compute the new learning rate based on decay rate
+    cfg.train.lr *= 0.5
+    logging.info("Reduced learning rate to {}".format(cfg.train.lr))
+    sys.stdout.flush()
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = cfg.train.lr
+
+    return optimizer
+
+
+def batch_accuracy(predicted, true):
+    """ Compute the accuracies for a batch of predictions and answers """
+    predicted = predicted.detach().argmax(1)
+    agreeing = (predicted == true)
+    return agreeing
+
+
+def save_checkpoint(epoch, model, optimizer, model_kwargs, filename):
+    state = {
+        'epoch': epoch,
+        'state_dict': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'model_kwargs': model_kwargs,
+    }
+    time.sleep(10)
+    torch.save(state, filename)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--cfg', dest='cfg_file', help='optional config file', default='tgif_qa_action.yml', type=str)
+    args = parser.parse_args()
+    if args.cfg_file is not None:
+        cfg_from_file(args.cfg_file)
+
+    assert cfg.dataset.name in ['tgif-qa', 'msrvtt-qa', 'msvd-qa','video-narr']
+    assert cfg.dataset.question_type in ['frameqa', 'count', 'transition', 'action', 'none']
+    # check if the data folder exists
+    assert os.path.exists(cfg.dataset.data_dir)
+    # check if k_max is set correctly
+    assert cfg.train.k_max_frame_level <= 16
+    assert cfg.train.k_max_clip_level <= 8
+
+
+    if not cfg.multi_gpus:
+        torch.cuda.set_device(cfg.gpu_id)
+    # make logging.info display into both shell and file
+    cfg.dataset.save_dir = os.path.join(cfg.dataset.save_dir, cfg.exp_name)
+    if not os.path.exists(cfg.dataset.save_dir):
+        os.makedirs(cfg.dataset.save_dir)
+    else:
+        assert os.path.isdir(cfg.dataset.save_dir)
+    log_file = os.path.join(cfg.dataset.save_dir, "log")
+    if not cfg.train.restore and not os.path.exists(log_file):
+        os.mkdir(log_file)
+    else:
+        assert os.path.isdir(log_file)
+
+    fileHandler = logging.FileHandler(os.path.join(log_file, 'stdout.log'), 'w+')
+    fileHandler.setFormatter(logFormatter)
+    rootLogger.addHandler(fileHandler)
+    # args display
+    for k, v in vars(cfg).items():
+        logging.info(k + ':' + str(v))
+    # concat absolute path of input files
+
+    if cfg.dataset.name == 'tgif-qa':
+        cfg.dataset.train_question_pt = os.path.join(cfg.dataset.data_dir,
+                                                     cfg.dataset.train_question_pt.format(cfg.dataset.name, cfg.dataset.question_type))
+        cfg.dataset.val_question_pt = os.path.join(cfg.dataset.data_dir,
+                                                   cfg.dataset.val_question_pt.format(cfg.dataset.name, cfg.dataset.question_type))
+        cfg.dataset.vocab_json = os.path.join(cfg.dataset.data_dir, cfg.dataset.vocab_json.format(cfg.dataset.name, cfg.dataset.question_type))
+
+        cfg.dataset.appearance_feat = os.path.join(cfg.dataset.data_dir, cfg.dataset.appearance_feat.format(cfg.dataset.name, cfg.dataset.question_type))
+        cfg.dataset.motion_feat = os.path.join(cfg.dataset.data_dir, cfg.dataset.motion_feat.format(cfg.dataset.name, cfg.dataset.question_type))
+    # 본 경진대회 데이터셋은 아래 else문에서 동작
+    else:
+        cfg.dataset.question_type = 'none'
+        cfg.dataset.appearance_feat = '{}_appearance_feat.h5'
+        cfg.dataset.motion_feat = '{}_motion_feat.h5'
+        cfg.dataset.vocab_json = '{}_vocab.json' if not cfg.train.split_train else '{}_all_vocab.json'
+        cfg.dataset.train_question_pt = '{}_train_questions.pt' if cfg.train.split_train else '{}_trainall_questions.pt'
+        cfg.dataset.val_question_pt = '{}_val_questions.pt' if cfg.train.split_train else None
+        cfg.dataset.train_question_pt = os.path.join(cfg.dataset.data_dir,
+                                                     cfg.dataset.train_question_pt.format(cfg.dataset.name))
+        cfg.dataset.val_question_pt = os.path.join(cfg.dataset.data_dir,
+                                                   cfg.dataset.val_question_pt.format(cfg.dataset.name)) if cfg.train.split_train else None
+        cfg.dataset.vocab_json = os.path.join(cfg.dataset.data_dir, cfg.dataset.vocab_json.format(cfg.dataset.name))
+
+        cfg.dataset.appearance_feat = os.path.join(cfg.dataset.data_dir, cfg.dataset.appearance_feat.format(cfg.dataset.name))
+        cfg.dataset.motion_feat = os.path.join(cfg.dataset.data_dir, cfg.dataset.motion_feat.format(cfg.dataset.name))
+
+    if cfg.tokenizer:
+        cfg.dataset.vocab_json = cfg.tokenizer
+
+    # set random seed
+    torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(cfg.seed)
+
+    train(cfg)
+
+
+if __name__ == '__main__':
+    main()

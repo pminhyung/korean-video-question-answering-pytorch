@@ -1,0 +1,36 @@
+gpu_id: 0
+multi_gpus: True
+num_workers: 2
+seed: 153
+exp_name: 'exp2-KoElectra'
+tokenizer: './data/video-narr/tokenizer/'
+
+train:
+  lr: 0.0001
+  batch_size: 32
+  restore: False
+  max_epochs: 25
+  word_dim: 768 #300
+  module_dim: 512
+  glove: True
+  k_max_frame_level: 16
+  k_max_clip_level: 8
+  spl_resolution: 1
+  split_train: False
+  scheduler: CosineAnnealing
+  warmup_min_lr: 0.00001 # 0.0001 
+
+val:
+  flag: False
+
+test:
+  test_num: 0
+  write_preds: True
+  model_fname: 'model_all.pt'
+  submission: True
+
+dataset:
+  name: 'video-narr'
+  question_type: 'none'
+  data_dir: './data/video-narr'
+  save_dir: 'results/'
